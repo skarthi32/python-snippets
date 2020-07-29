@@ -1,0 +1,163 @@
+# ex_trigger_DAG.py
+#!/usr/bin/env python
+
+from __future__ import print_function
+
+import datetime
+
+from airflow import DAG
+
+from airflow.operators.python_operator import PythonOperator
+from airflow.operators.dagrun_operator import TriggerDagRunOperator
+from airflow.sensors.external_task_sensor import ExternalTaskSensor
+from airflow.models import TaskInstance
+from airflow.utils import timezone
+from airflow.utils.db import provide_session
+
+with DAG('gridu_parent_dag', schedule_interval=None, start_date=datetime.datetime(2020, 3, 25), catchup=False) as parent_dag:
+    print_context_op = PythonOperator(
+        task_id='print_context_task',
+        python_callable=lambda **kwargs: print(kwargs),
+        provide_context=True
+        )
+
+    child_exec_date = timezone.make_aware(datetime.datetime.now())
+
+    record_exec_date_op = PythonOperator(
+        task_id='record_exec_date_task',
+        python_callable=lambda ds, **c: c['ti'].xcom_push(key='child_exec_date', value=child_exec_date.isoformat()),
+        provide_context=True
+        )
+
+    print_exec_date_op = PythonOperator(
+        task_id='print_exec_date_task',
+        python_callable=lambda ds, **kwargs: print(kwargs['ti'].xcom_pull(task_ids='record_exec_date_task', key='child_exec_date')),
+        provide_context=True
+        )
+
+    print_exec_date2_op = PythonOperator(
+        task_id='print_exec_date2_task',
+        python_callable=lambda ds, **kwargs: print(kwargs['ti'].xcom_pull(task_ids='record_exec_date_task', key='child_exec_date')),
+        provide_context=True
+        )
+
+    dag_run_op = TriggerDagRunOperator(
+        task_id='dag_trigger_task',
+        trigger_dag_id='gridu_child_dag',
+        execution_date="{{ ti.xcom_pull(task_ids='record_exec_date_task', key='child_exec_date') }}"
+        )
+
+    @provide_session
+    def get_child_exec_date(dt, session=None):
+        ti = session.query(TaskInstance).filter(
+            TaskInstance.dag_id == 'gridu_parent_dag',
+            TaskInstance.task_id == 'record_exec_date_task',
+            TaskInstance.execution_date == dt
+            ).first()
+        string_dt = ti.xcom_pull(
+            task_ids='record_exec_date_task',
+            key='child_exec_date',
+            dag_id='gridu_parent_dag')
+        return timezone.parse(string_dt)
+
+    dag_sensor_op = ExternalTaskSensor(
+            task_id='dag_waiter_task',
+            external_dag_id='gridu_child_dag',
+            # execution_date_fn=lambda dt: child_exec_date, # lambda to return ex_dag_exec_date whatever is passed to it
+            execution_date_fn=get_child_exec_date,
+            poke_interval=20,
+            )
+
+    print_context_op >> record_exec_date_op >> print_exec_date_op >> print_exec_date2_op >> dag_run_op >> dag_sensor_op
+
+with DAG('gridu_child_dag', schedule_interval=None, start_date=datetime.datetime(2020, 3, 25), catchup=False) as child_dag:
+    print_context_op = PythonOperator(
+        task_id='print_context_task',
+        python_callable=lambda **kwargs: print(kwargs),
+        provide_context=True
+        )
+        
+        
+        
+------------------------------------------------------------------------------------------------------------------------------
+# multi_external_task_sensor.py
+
+import logging
+
+try:
+  from airflow.exceptions import AirflowException
+except ImportError:
+  from airflow.utils import AirflowException
+
+from airflow import settings
+from airflow.plugins_manager import AirflowPlugin
+from airflow.operators.sensors import BaseSensorOperator, ExternalTaskSensor
+from airflow.models import State, TaskInstance
+from airflow.utils import apply_defaults
+
+
+
+
+class MultiExternalTaskSensor(BaseSensorOperator):
+    """
+    This sensor waits until all of the specified dag, task pairs have completed.
+    This method wraps ExternalTaskSensor by default, but can be reconfigured to
+    use a different sensor implementation if needed.
+    :param external_dag_task_pairs: Iterable of dag, task id pairs you want this to depend on
+    :type external_dag_task_pairs: list/tuple of (string, string) tuples
+    :param allowed_states: list of allowed states, default is ``['success']``
+    :type allowed_states: list
+    :param execution_delta: time difference with the previous execution to
+        look at, the default is the same execution_date as the current task.
+        For yesterday, use [positive!] datetime.timedelta(days=1)
+    :type execution_delta: datetime.timedelta
+    """
+
+    @apply_defaults
+    def __init__(
+            self,
+            external_dag_task_pairs=None,
+            allowed_states=None,
+            execution_delta=None,
+            *args, **kwargs):
+        super(MultiExternalTaskSensor, self).__init__(*args, **kwargs)
+        self.allowed_states = allowed_states or [State.SUCCESS]
+        self.execution_delta = execution_delta
+        self.external_dag_task_pairs = external_dag_task_pairs
+        sensor_class = self.sensor_class()
+        if not self._validate_pairs(self.external_dag_task_pairs):
+            raise AirflowException("external_dag_task_pairs must be a list/tuple of string tuples"
+                                   ", got %r" % self.external_dag_task_pairs)
+        self.dependencies = [sensor_class(task_id='dummy_internal_task_%s_%s' % (dag, task),
+                                          owner=self.owner,
+                                          external_dag_id=dag,
+                                          external_task_id=task,
+                                          allowed_states=self.allowed_states,
+                                          execution_delta=self.execution_delta)
+                               for dag, task in self.external_dag_task_pairs]
+
+    def poke(self, context):
+        success = True
+        for dep in self.dependencies:
+            if not dep.poke(context):
+                logging.info("Still waiting on dependency %s.%s", dep.external_dag_id, dep.external_task_id)
+                success = False
+
+        return success
+
+    def _validate_pairs(self, pairs):
+        """Returns True iff `pairs` contains 2-element string tuples"""
+        valid = isinstance(pairs, (list, tuple))
+        if valid:
+            for pair in pairs:
+                valid &= (isinstance(pair, tuple)
+                          and len(pair) == 2 and
+                          all(isinstance(elem, basestring) for elem in pair))
+                if not valid:
+                    break
+        return valid
+
+    @classmethod
+    def sensor_class(cls):
+      return ExternalTaskSensor
+
