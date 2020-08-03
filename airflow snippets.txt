@@ -161,3 +161,87 @@ class MultiExternalTaskSensor(BaseSensorOperator):
     def sensor_class(cls):
       return ExternalTaskSensor
 
+
+----------------------------------------------------------------------------------------------------------------------------------------------------------
+
+from sqlalchemy import func
+from airflow.utils import timezone
+from airflow.exceptions import AirflowException
+from airflow.models import DagBag, DagModel, DagRun, TaskInstance
+from airflow.sensors.base_sensor_operator import BaseSensorOperator
+from airflow.utils.db import provide_session
+from airflow.utils.decorators import apply_defaults
+from airflow.utils.state import State
+
+
+class TaskCompletionSensor(BaseSensorOperator):
+    """
+    Waits for a different DAG or a task in a different DAG to complete for a
+    specific execution_date
+    """
+    template_fields = ['external_dag_id', 'external_task_id']
+    ui_color = '#e5ff00'
+
+    @apply_defaults
+    def __init__(self,
+                 external_dag_id,
+                 external_task_id=None,
+                 xcom_task_id=None,
+                 xcom_task_id_key=None,
+                 *args,
+                 **kwargs):
+        super(TaskCompletionSensor, self).__init__(*args, **kwargs)
+        if external_task_id is None:
+            raise ValueError("external_task_id is required for TaskCompletionSensor")
+
+        if xcom_task_id is None or xcom_task_id_key is None:
+            raise ValueError("xcom_task_id and xcom_task_id_key is required for TaskCompletionSensor")
+
+        self.external_dag_id = external_dag_id
+        self.external_task_id = external_task_id
+        self.xcom_task_id = xcom_task_id
+        self.xcom_task_id_key = xcom_task_id_key
+
+    @provide_session
+    def poke(self, context, session=None):
+        if self.xcom_task_id and self.xcom_task_id_key:
+            self.log.info("*********************Getting Execution date from context ****************************")
+            dttm = timezone.parse(context['ti'].xcom_pull(self.xcom_task_id, key=self.xcom_task_id_key))
+        else:
+            dttm = context['execution_date']
+
+        self.log.info(dttm)
+        dttm_filter = dttm if isinstance(dttm, list) else [dttm]
+        serialized_dttm_filter = ','.join([datetime.isoformat() for datetime in dttm_filter])
+
+        self.log.info(
+            'Poking for %s.%s on %s ... ',
+            self.external_dag_id, self.external_task_id, serialized_dttm_filter
+        )
+
+        TI = TaskInstance
+
+        failure_count = session.query(func.count()).filter(
+            TI.dag_id == self.external_dag_id,
+            TI.task_id == self.external_task_id,
+            TI.state.in_([State.FAILED]),
+            TI.execution_date.in_(dttm_filter),
+        ).scalar()
+
+        success_count = session.query(func.count()).filter(
+            TI.dag_id == self.external_dag_id,
+            TI.task_id == self.external_task_id,
+            TI.state.in_([State.SUCCESS]),
+            TI.execution_date.in_(dttm_filter),
+        ).scalar()
+
+        session.commit()
+
+        self.log.info("success_count:%d,failure_count:%d", success_count, failure_count)
+
+        if failure_count == len(dttm_filter):
+            raise AirflowException('The external task'
+                                   '{} in DAG {} has failed.'.format(self.external_task_id,
+                                                                     self.external_dag_id))
+
+        return success_count == len(dttm_filter)
