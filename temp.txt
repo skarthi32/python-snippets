@@ -6,38 +6,25 @@ from app.utils.DataConnector import DataConnector
 
 from app.schemas import date_schema
 
-RUN_DATE_DATA_PATH = "file:///C:/TEMP/data"
+RUN_DATE_CONFIG_KEY = 'data'
 
-DOD_PROCESSING_DATE_PATH = "file:///C:/TEMP/dod_run_date"
-
-
-def get_previous_day(actual_run_date: datetime):
-    weekday = actual_run_date.weekday()
-    if weekday == 1:
-        return actual_run_date - timedelta(days=3)
-    elif 2 <= weekday <= 5:
-        return actual_run_date - timedelta(days=1)
-    else:
-        raise Exception("Weekend cannot run job")
+DOD_PROCESSING_DATE_CONFIG_KEY = "dod_run_date"
 
 
 def update_run_date(connector, config, data_processing_date):
-    extra_options = {'inferSchema': True}
-    df = connector.read_data('csv', RUN_DATE_DATA_PATH, config, schema=date_schema.RUN_DATE_SCHEMA, extra_options=extra_options)
+    df = connector.read_source('data', schema=date_schema.RUN_DATE_SCHEMA)
     df.printSchema()
     df.show(10, truncate=False)
     date_records = df.collect()
     if len(date_records) > 0:
         previous_data_processing_date = date_records[0][1]
-
         if data_processing_date.date() > previous_data_processing_date:
-            new_record_df = connector.createDataFrame([(previous_data_processing_date, data_processing_date)], date_schema.RUN_DATE_SCHEMA)
-            # new_record_df.coalesce(1).write.mode('overwrite').csv(RUN_DATE_DATA_PATH)
-            connector.write_data("csv", new_record_df.coalesce(1), RUN_DATE_DATA_PATH, save_mode="overwrite")
+            new_record_df = connector.createDataFrame([(previous_data_processing_date, data_processing_date)],
+                                                      date_schema.RUN_DATE_SCHEMA)
+            connector.write_to_sink(new_record_df.coalesce(1), RUN_DATE_CONFIG_KEY, save_mode="overwrite")
     else:
         new_record_df = connector.createDataFrame([(None, data_processing_date)], date_schema.RUN_DATE_SCHEMA)
-        # new_record_df.coalesce(1).write.mode('overwrite').csv(RUN_DATE_DATA_PATH)
-        connector.write_data("csv", new_record_df.coalesce(1), RUN_DATE_DATA_PATH, save_mode="overwrite")
+        connector.write_to_sink(new_record_df.coalesce(1), RUN_DATE_CONFIG_KEY, save_mode="overwrite")
 
 
 def create_test_data(connector):
@@ -48,14 +35,13 @@ def create_test_data(connector):
     ], date_schema.RUN_DATE_SCHEMA)
     df.printSchema()
     df.show(truncate=False)
-    connector.write_data("csv", df, RUN_DATE_DATA_PATH, save_mode="overwrite")
-    # df.write.mode("overwrite").csv(RUN_DATE_DATA_PATH)
+    connector.write_to_sink(df, RUN_DATE_CONFIG_KEY, save_mode="overwrite")
 
 
 def process(spark, config):
     print("Job1 started.")
 
-    connector = DataConnector(spark)
+    connector = DataConnector(spark, config)
 
     create_test_data(connector)
 
@@ -63,15 +49,13 @@ def process(spark, config):
     actual_run_date = datetime.today()
 
     # get previous date
-    data_processing_date = get_previous_day(actual_run_date)
+    data_processing_date = date_util.get_previous_day(actual_run_date)
 
     # update the run_date table
     update_run_date(connector, config, data_processing_date)
 
     # get the current extract and prev extract date from S3
-    extra_options = {'inferSchema': True}
-    date_records = connector.read_data('csv', RUN_DATE_DATA_PATH, config, schema=date_schema.RUN_DATE_SCHEMA,
-                                       extra_options=extra_options).collect()
+    date_records = connector.read_source('data', schema=date_schema.RUN_DATE_SCHEMA).collect()
     prev_extract_date = date_records[0][0]
     extract_date = date_records[0][1]
 
@@ -116,10 +100,70 @@ def process(spark, config):
 
     df.printSchema()
     df.show(truncate=False)
-    connector.write_data("csv", df, DOD_PROCESSING_DATE_PATH, save_mode="overwrite")
+    connector.write_to_sink(df, DOD_PROCESSING_DATE_CONFIG_KEY, save_mode="overwrite")
 
     print("Job1 completed.")
------------------------------------------------------------------------------------
+
+
+------------------------------------------------------------------------------------------------------------------------------------------------
+
+from datetime import datetime, timedelta
+import calendar
+
+
+def get_previous_day(actual_run_date: datetime):
+    weekday = actual_run_date.weekday()
+    if weekday == 1:
+        return actual_run_date - timedelta(days=3)
+    elif 2 <= weekday <= 5:
+        return actual_run_date - timedelta(days=1)
+    else:
+        raise Exception("Weekend cannot run job")
+
+
+def previous_month_end_date(date: datetime, no_of_months_before: int) -> datetime:
+    curr_date = date
+    while no_of_months_before > 0:
+        curr_date = curr_date - timedelta(days=curr_date.day)
+        no_of_months_before = no_of_months_before - 1
+    return curr_date
+
+
+def add_month(date: datetime, no_of_months: int) -> datetime:
+    current_day = date
+    count = 0
+    while count != no_of_months:
+        current_day = current_day + timedelta(days=calendar.monthlen(current_day.year, current_day.month))
+        count = count + 1
+    return current_day
+
+
+def subract_month(date: datetime, no_of_months: int) -> datetime:
+    curr_date = date
+    no_of_remaining_days = calendar.monthlen(curr_date.year, curr_date.month) - curr_date.day
+    curr_date = curr_date - timedelta(days=curr_date.day)
+    count = 1
+    while count != no_of_months:
+        curr_date = curr_date - timedelta(days=calendar.monthlen(curr_date.year, curr_date.month))
+        count = count + 1
+    return curr_date - timedelta(days=no_of_remaining_days)
+
+
+def monthdelta(date, delta):
+    m, y = (date.month + delta) % 12, date.year + ((date.month) + delta - 1) // 12
+    if not m: m = 12
+    d = min(date.day, calendar.monthrange(y, m)[1])
+    return date.replace(day=d, month=m, year=y)
+
+
+if __name__ == '__main__':
+    print(monthdelta(datetime.today(), 3))
+    print(monthdelta(datetime.today(), -12))
+    print(add_month(datetime.today(), 3))
+    print(subract_month(datetime.today(), 12))
+    print(previous_month_end_date(datetime.today(), 2))
+
+------------------------------------------------------------------------------------------------------------------------------------------------
 
 from pyspark.sql.types import StructField, StructType, DateType, IntegerType, StringType
 
@@ -139,28 +183,46 @@ DOD_PROCESSING_DATE_SCEHMA = StructType([
     StructField("yyyy_mm", StringType(), True),
 ])
 
-
----------------------------------------------------------
+-----------------------------------------------------------------------------------------------------------------------------------------------
 
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql.types import StructField, StructType, DateType
 from datetime import datetime, timedelta
 
+from app.utils.YamlConf import YamlConf
+
 
 class DataConnector:
-    def __init__(self, spark):
-        self.spark = spark
+    def __init__(self, spark, config):
+        self._spark = spark
+        self._config = config
+
+    def _apply_extra_options(self, dfReader, extra_options, format_file):
+        if extra_options is not None:
+            if len(extra_options) > 0:
+                print("extra_options:", extra_options)
+                dfReader = dfReader.options(**extra_options)
+        else:
+            default_options: dict = self._config['SparkReadOption'][format_file]
+            if default_options is not None and len(default_options) > 0:
+                print("default_options:", default_options)
+                dfReader = dfReader.options(**default_options)
+        return dfReader
+
+    def _apply_schema(self, dfReader, schema):
+        if schema is not None:
+            dfReader = dfReader.schema(schema)
+        return dfReader
 
     def read_data(self, format_file: str,
                   path_or_table_name,
-                  config,
                   schema=None,
                   extra_options: dict = None) -> DataFrame:
-        dfReader = self.spark.read
+        dfReader = self._spark.read
 
-        dfReader = self.apply_schema(dfReader, schema)
+        dfReader = self._apply_schema(dfReader, schema)
 
-        dfReader = self.apply_extra_options(config, dfReader, extra_options, format_file)
+        dfReader = self._apply_extra_options(dfReader, extra_options, format_file)
 
         if format_file == "csv":
             return dfReader.csv(path_or_table_name)
@@ -171,22 +233,12 @@ class DataConnector:
         else:
             Exception("Unknown format:{}".format(format))
 
-    def apply_extra_options(self, config, dfReader, extra_options, format_file):
-        if extra_options is not None:
-            if len(extra_options) > 0:
-                print("extra_options:", extra_options)
-                dfReader = dfReader.options(**extra_options)
-        elif config is not None:
-            default_options: dict = config[format_file]
-            if len(default_options) > 0:
-                print("default_options:", default_options)
-                dfReader = dfReader.options(**default_options)
-        return dfReader
-
-    def apply_schema(self, dfReader, schema):
-        if schema is not None:
-            dfReader = dfReader.schema(schema)
-        return dfReader
+    def read_source(self, input_config_key,
+                    schema=None,
+                    extra_options: dict = None) -> DataFrame:
+        source_file_type = self._get_source_file_type(input_config_key)
+        source_location = self._get_source_location(input_config_key)
+        return self.read_data(source_file_type, source_location, schema, extra_options)
 
     def write_data(self, format_file: str,
                    dataframe: DataFrame,
@@ -218,11 +270,20 @@ class DataConnector:
 
         return None
 
+    def write_to_sink(self, dataframe: DataFrame,
+                      output_config_key: str,
+                      save_mode: str = "append",
+                      partitionBy=None,
+                      extra_options: dict = None):
+        sinkfile_type = self._get_sink_file_type(output_config_key)
+        sink_location = self._get_sink_location(output_config_key)
+        return self.write_data(sinkfile_type, dataframe, sink_location, save_mode, partitionBy, extra_options)
+
     def createDataFrame(self, data, schema=None):
-        return self.spark.createDataFrame(data, schema)
+        return self._spark.createDataFrame(data, schema)
 
     def is_table_exist(self, table_name):
-        return self.spark.catalog._jcatalog.tableExists(table_name)
+        return self._spark.catalog._jcatalog.tableExists(table_name)
 
     def is_source_data_exist(self, format_file: str,
                              path_or_table_name) -> bool:
@@ -232,10 +293,25 @@ class DataConnector:
         except:
             return False
 
+    def _get_source_file_type(self, key):
+        return self._config['source_file_type'][key]
+
+    def _get_sink_file_type(self, key):
+        return self._config['sink_file_type'][key]
+
+    def _get_source_location(self, key):
+        file_type = self._get_source_file_type(key)
+        return self._config[file_type][key]['source']
+
+    def _get_sink_location(self, key):
+        file_type = self._get_sink_file_type(key)
+        return self._config[file_type][key]['sink']
+
 
 if __name__ == '__main__':
     spark = SparkSession.builder.appName("data-split").master("local[2]").getOrCreate()
-    connector = DataConnector(spark)
+    config = YamlConf('dev').get_config()
+    connector = DataConnector(spark, config)
     # print("is_source_data_exist:", connector.is_source_data_exist("csv", "file:///C:/TEMP/data"))
 
     field = [StructField("prev_data_process", DateType(), True),
@@ -256,3 +332,64 @@ if __name__ == '__main__':
     print("is_source_data_exist:", connector.is_source_data_exist("table", "run_date_tbl"))
 
     connector.read_data("table", "run_date_tbl", None).show(truncate=False)
+
+------------------------------------------------------------------------------------------------------------------------------------------------
+
+SparkSubmit:
+  master : 'local[*]'
+  appName : 'spark-demo'
+  logLevel : 'error'
+
+SparkReadOption:
+  table:
+  parquet:
+  csv:
+    inferschema : 'True'
+
+csv:
+  data :
+    source : 'file:///C:/TEMP/data'
+    sink :  'file:///C:/TEMP/data'
+  dod_run_date :
+    source : 'file:///C:/TEMP/dod_run_date'
+    sink : 'file:///C:/TEMP/dod_run_date'
+
+source_file_type:
+  data : 'csv'
+  dod_run_date : 'csv'
+
+sink_file_type:
+  data : 'csv'
+  dod_run_date : 'csv'
+
+
+-------------------------------------------------------------------------------------------------------------------------------------------------
+
+import yaml
+
+
+class YamlConf:
+    def __init__(self, env):
+        configYaml: None
+        confPath = "app/conf/dod_{}.yaml".format(env)
+        print("Config path: {}".format(confPath))
+        with open(confPath) as file:
+            configYaml = yaml.load(file, Loader=yaml.FullLoader)
+
+        self._configYaml = configYaml
+
+    def get_config(self):
+        return self._configYaml
+
+    def get_source_type(self,key):
+        return self._configYaml['input'][key]
+
+    def get_source_file_type(self,key):
+        return self._configYaml['source_file_type'][key]
+
+    def get_sink_file_type(self,key):
+        return self._configYaml['sink_file_type'][key]
+
+    def get_source_location(self,key):
+        file_type = self.get_source_file_type()
+        return self._configYaml[file_type][key]
