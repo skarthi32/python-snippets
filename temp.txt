@@ -1,0 +1,258 @@
+from pyspark.sql.types import StructField, StructType, DateType
+from datetime import datetime, timedelta
+
+from app.utils import date_util
+from app.utils.DataConnector import DataConnector
+
+from app.schemas import date_schema
+
+RUN_DATE_DATA_PATH = "file:///C:/TEMP/data"
+
+DOD_PROCESSING_DATE_PATH = "file:///C:/TEMP/dod_run_date"
+
+
+def get_previous_day(actual_run_date: datetime):
+    weekday = actual_run_date.weekday()
+    if weekday == 1:
+        return actual_run_date - timedelta(days=3)
+    elif 2 <= weekday <= 5:
+        return actual_run_date - timedelta(days=1)
+    else:
+        raise Exception("Weekend cannot run job")
+
+
+def update_run_date(connector, config, data_processing_date):
+    extra_options = {'inferSchema': True}
+    df = connector.read_data('csv', RUN_DATE_DATA_PATH, config, schema=date_schema.RUN_DATE_SCHEMA, extra_options=extra_options)
+    df.printSchema()
+    df.show(10, truncate=False)
+    date_records = df.collect()
+    if len(date_records) > 0:
+        previous_data_processing_date = date_records[0][1]
+
+        if data_processing_date.date() > previous_data_processing_date:
+            new_record_df = connector.createDataFrame([(previous_data_processing_date, data_processing_date)], date_schema.RUN_DATE_SCHEMA)
+            # new_record_df.coalesce(1).write.mode('overwrite').csv(RUN_DATE_DATA_PATH)
+            connector.write_data("csv", new_record_df.coalesce(1), RUN_DATE_DATA_PATH, save_mode="overwrite")
+    else:
+        new_record_df = connector.createDataFrame([(None, data_processing_date)], date_schema.RUN_DATE_SCHEMA)
+        # new_record_df.coalesce(1).write.mode('overwrite').csv(RUN_DATE_DATA_PATH)
+        connector.write_data("csv", new_record_df.coalesce(1), RUN_DATE_DATA_PATH, save_mode="overwrite")
+
+
+def create_test_data(connector):
+    df = connector.createDataFrame([
+        (datetime(2020, 8, 19), datetime(2020, 8, 20)),
+        (datetime(2020, 8, 18), datetime(2020, 8, 19)),
+        (datetime(2020, 8, 17), datetime(2020, 8, 18))
+    ], date_schema.RUN_DATE_SCHEMA)
+    df.printSchema()
+    df.show(truncate=False)
+    connector.write_data("csv", df, RUN_DATE_DATA_PATH, save_mode="overwrite")
+    # df.write.mode("overwrite").csv(RUN_DATE_DATA_PATH)
+
+
+def process(spark, config):
+    print("Job1 started.")
+
+    connector = DataConnector(spark)
+
+    create_test_data(connector)
+
+    # get actual run date
+    actual_run_date = datetime.today()
+
+    # get previous date
+    data_processing_date = get_previous_day(actual_run_date)
+
+    # update the run_date table
+    update_run_date(connector, config, data_processing_date)
+
+    # get the current extract and prev extract date from S3
+    extra_options = {'inferSchema': True}
+    date_records = connector.read_data('csv', RUN_DATE_DATA_PATH, config, schema=date_schema.RUN_DATE_SCHEMA,
+                                       extra_options=extra_options).collect()
+    prev_extract_date = date_records[0][0]
+    extract_date = date_records[0][1]
+
+    previous_month_end_date = date_util.previous_month_end_date(extract_date, 1)
+
+    # validate the DETAIL table is available or not
+    acc_table = "T_ACCOUNT_" + str(previous_month_end_date.year) + previous_month_end_date.strftime('%m')
+
+    print("Account Table:{}".format(acc_table))
+
+    if connector.is_table_exist(acc_table):
+        me_date = date_util.previous_month_end_date(extract_date, 1)
+    else:
+        me_date = date_util.previous_month_end_date(extract_date, 2)
+
+    print("me_date:{}".format(me_date))
+
+    year = me_date.year
+    month = me_date.strftime('%m')
+
+    yyyymm = str(year) + month
+    yyyy_mm = str(year) + "_" + month
+
+    had_date = extract_date.strftime('%Y-%m-%d')
+
+    # Store the date in S3
+
+    print("extract_date:", extract_date.strftime("%d/%m/%Y"))
+    print("prev_extract_date:", prev_extract_date.strftime("%d/%m/%Y"))
+    print("me_date:", me_date.strftime("%d/%m/%Y"))
+    print(year, month)
+    print(yyyymm, yyyy_mm)
+    print(had_date)
+
+    df = connector.createDataFrame([
+        (extract_date.strftime("%d/%m/%Y"),
+         prev_extract_date.strftime("%d/%m/%Y"),
+         me_date.strftime("%d/%m/%Y"),
+         had_date,
+         year, month, yyyymm, yyyy_mm)
+    ], date_schema.DOD_PROCESSING_DATE_SCEHMA)
+
+    df.printSchema()
+    df.show(truncate=False)
+    connector.write_data("csv", df, DOD_PROCESSING_DATE_PATH, save_mode="overwrite")
+
+    print("Job1 completed.")
+-----------------------------------------------------------------------------------
+
+from pyspark.sql.types import StructField, StructType, DateType, IntegerType, StringType
+
+RUN_DATE_SCHEMA = StructType([
+    StructField("prev_data_process", DateType(), True),
+    StructField("data_process", DateType(), True)
+])
+
+DOD_PROCESSING_DATE_SCEHMA = StructType([
+    StructField("extract_date", StringType(), True),
+    StructField("prev_extract_date", StringType(), True),
+    StructField("me_date", StringType(), True),
+    StructField("had_date", StringType(), True),
+    StructField("year", StringType(), True),
+    StructField("month", StringType(), True),
+    StructField("yyyymm", StringType(), True),
+    StructField("yyyy_mm", StringType(), True),
+])
+
+
+---------------------------------------------------------
+
+from pyspark.sql import DataFrame, SparkSession
+from pyspark.sql.types import StructField, StructType, DateType
+from datetime import datetime, timedelta
+
+
+class DataConnector:
+    def __init__(self, spark):
+        self.spark = spark
+
+    def read_data(self, format_file: str,
+                  path_or_table_name,
+                  config,
+                  schema=None,
+                  extra_options: dict = None) -> DataFrame:
+        dfReader = self.spark.read
+
+        dfReader = self.apply_schema(dfReader, schema)
+
+        dfReader = self.apply_extra_options(config, dfReader, extra_options, format_file)
+
+        if format_file == "csv":
+            return dfReader.csv(path_or_table_name)
+        elif format_file == "parquet":
+            return dfReader.parquet(path_or_table_name)
+        elif format_file == "table" or format_file == 'temp_table':
+            return dfReader.table(path_or_table_name)
+        else:
+            Exception("Unknown format:{}".format(format))
+
+    def apply_extra_options(self, config, dfReader, extra_options, format_file):
+        if extra_options is not None:
+            if len(extra_options) > 0:
+                print("extra_options:", extra_options)
+                dfReader = dfReader.options(**extra_options)
+        elif config is not None:
+            default_options: dict = config[format_file]
+            if len(default_options) > 0:
+                print("default_options:", default_options)
+                dfReader = dfReader.options(**default_options)
+        return dfReader
+
+    def apply_schema(self, dfReader, schema):
+        if schema is not None:
+            dfReader = dfReader.schema(schema)
+        return dfReader
+
+    def write_data(self, format_file: str,
+                   dataframe: DataFrame,
+                   path_or_table_name: str,
+                   save_mode: str = "append",
+                   partitionBy=None,
+                   extra_options: dict = None):
+        dataframe_writer = dataframe.write
+
+        if format_file != 'temp_table' and format_file != 'table':
+            dataframe_writer = dataframe_writer.format(format_file)
+
+        if extra_options is not None:
+            if len(extra_options) > 0:
+                dataframe_writer = dataframe_writer.options(**extra_options)
+
+        if partitionBy is not None:
+            if isinstance(partitionBy, str):
+                dataframe_writer = dataframe_writer.partitionBy(partitionBy)
+            else:
+                dataframe_writer = dataframe_writer.partitionBy(*partitionBy)
+
+        if format_file == 'table':
+            dataframe_writer.mode(save_mode).saveAsTable(path_or_table_name)
+        elif format_file == 'temp_table':
+            dataframe.createOrReplaceTempView(path_or_table_name)
+        else:
+            dataframe_writer.mode(save_mode).save(path_or_table_name)
+
+        return None
+
+    def createDataFrame(self, data, schema=None):
+        return self.spark.createDataFrame(data, schema)
+
+    def is_table_exist(self, table_name):
+        return self.spark.catalog._jcatalog.tableExists(table_name)
+
+    def is_source_data_exist(self, format_file: str,
+                             path_or_table_name) -> bool:
+        try:
+            self.read_data(format_file, path_or_table_name, None)
+            return True
+        except:
+            return False
+
+
+if __name__ == '__main__':
+    spark = SparkSession.builder.appName("data-split").master("local[2]").getOrCreate()
+    connector = DataConnector(spark)
+    # print("is_source_data_exist:", connector.is_source_data_exist("csv", "file:///C:/TEMP/data"))
+
+    field = [StructField("prev_data_process", DateType(), True),
+             StructField("data_process", DateType(), True)]
+
+    schema = StructType(field)
+
+    df: DataFrame = connector.createDataFrame([
+        (datetime(2020, 8, 19), datetime(2020, 8, 20)),
+        (datetime(2020, 8, 18), datetime(2020, 8, 19)),
+        (datetime(2020, 8, 17), datetime(2020, 8, 18))
+    ], schema)
+    df.printSchema()
+    df.show(truncate=False)
+
+    connector.write_data("table", df, "run_date_tbl", save_mode="overwrite")
+
+    print("is_source_data_exist:", connector.is_source_data_exist("table", "run_date_tbl"))
+
+    connector.read_data("table", "run_date_tbl", None).show(truncate=False)
