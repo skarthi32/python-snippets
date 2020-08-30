@@ -42,3 +42,19 @@ df.filter(col('is_first') == True).drop("row_number", "first_id", "last_id", "is
 df.printSchema()
 
 # df.drop("row_number", "first_id", "last_id", "is_last", "is_first").filter(col('is_first') == True).show(truncate=False)
+
+
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
+    row_number_spec = Window.partitionBy(*partitionCols).orderBy(*OrderByCols)
+    first_last_row_spec = Window.partitionBy(*partitionCols).orderBy("row_number")
+
+    df = dataframe.withColumn("row_number", row_number().over(row_number_spec))
+    df = df.withColumn("first_id", first('row_number').over(first_last_row_spec))
+    df = df.withColumn("last_id", last('row_number').over(first_last_row_spec))
+
+    df = df.withColumn("is_first", col('first_id') == col('row_number'))
+    df = df.withColumn("is_last", col('last_id') == col('row_number'))
+
+    return df
