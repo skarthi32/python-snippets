@@ -1,60 +1,25 @@
-from pyspark.sql import SparkSession
-from pyspark.sql.window import Window
-from pyspark.sql.functions import row_number, first, last, dense_rank, rank, col
+ columns = ["vb_account_seq", "start_time"]
 
-spark = SparkSession.builder.appName('SparkByExamples.com').getOrCreate()
+    df = spark.createDataFrame(data=data, schema=columns)
 
-data = (
-    (1, 'David', 45),
-    (1, 'David', 74),
-    (2, 'Sam', 45),
-    (2, 'Ram', 54),
-    (3, 'Bane', 87),
-    (3, 'Mary', 92),
-    (3, 'Bane', 87),
-    (4, 'Dane', 23),
-    (5, 'Jenny', 87),
-    (5, 'Ken', 87),
-    (6, 'Simran', 63),
-    (8, 'Priya', 72)
-)
+    orderByCols = [col("vb_account_seq"), col("start_time").desc()]
 
-columns = ["ID", "Name", "Score"]
+    row_number_window = Window.orderBy(*orderByCols)
 
-df = spark.createDataFrame(data=data, schema=columns)
+    df = df.withColumn("prev_start_date", lag("start_time", 1).over(row_number_window))
 
-df.show(truncate=False)
+    df = df.withColumn("prev_start_date_order", row_number().over(row_number_window))
 
-row_number_spec = Window.partitionBy("ID").orderBy("Score")
-first_last_row_spec = Window.partitionBy("ID").orderBy("row_number")
+    first_last_row_window = Window.partitionBy(col('vb_account_seq')).orderBy(*orderByCols).rowsBetween(
+        Window.unboundedPreceding,
+        Window.unboundedFollowing)
+    df = df.withColumn("prev_start_date_first_row", first("prev_start_date_order").over(first_last_row_window))
 
-df = df.withColumn("row_number", row_number().over(row_number_spec))
-df = df.withColumn("first_id", first('row_number').over(first_last_row_spec))
-df = df.withColumn("last_id", last('row_number').over(first_last_row_spec))
+    df = df.withColumn("first_vb_account_seq", col("prev_start_date_order") == col("prev_start_date_first_row"))
 
-df = df.withColumn("is_first", col('first_id') == col('row_number'))
-df = df.withColumn("is_last", col('last_id') == col('row_number'))
+    df = df.withColumn("prev_start_date",
+                       when(col("first_vb_account_seq") == True, None).otherwise(col("prev_start_date")))
 
-df.orderBy('ID', "row_number").show(truncate=False)
+    df = df.withColumn("end_date", col("prev_start_date") - lit(1))
 
-df.filter(col('is_first') == True).drop("row_number", "first_id", "last_id", "is_last", "is_first").orderBy('ID').show(truncate=False)
-
-df.printSchema()
-
-# df.drop("row_number", "first_id", "last_id", "is_last", "is_first").filter(col('is_first') == True).show(truncate=False)
-
-
----------------------------------------------------------------------------------------------------------------------------------------------------------------
-
-def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
-    row_number_spec = Window.partitionBy(*partitionCols).orderBy(*OrderByCols)
-    first_last_row_spec = Window.partitionBy(*partitionCols).orderBy("row_number")
-
-    df = dataframe.withColumn("row_number", row_number().over(row_number_spec))
-    df = df.withColumn("first_id", first('row_number').over(first_last_row_spec))
-    df = df.withColumn("last_id", last('row_number').over(first_last_row_spec))
-
-    df = df.withColumn("is_first", col('first_id') == col('row_number'))
-    df = df.withColumn("is_last", col('last_id') == col('row_number'))
-
-    return df
+    df.show(truncate=False)
