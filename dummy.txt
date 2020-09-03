@@ -1,3 +1,8 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.window import Window
+from pyspark.sql.functions import row_number, first, last, dense_rank, rank, col, when, lit, sum
+
+
 def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
     df = dataframe
     partitions = []
@@ -5,8 +10,9 @@ def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
         partitions.append(col(cols))
         row_number_window = Window.partitionBy(*partitions).orderBy(*OrderByCols)
         df = df.withColumn(cols + "_order", row_number().over(row_number_window))
-        first_last_row_window = Window.partitionBy(*partitions).orderBy(*OrderByCols).rowsBetween(Window.unboundedPreceding,
-                                                                                            Window.unboundedFollowing)
+        first_last_row_window = Window.partitionBy(*partitions).orderBy(*OrderByCols).rowsBetween(
+            Window.unboundedPreceding,
+            Window.unboundedFollowing)
         df = df.withColumn(cols + "_first_row", first(cols + "_order").over(first_last_row_window))
         df = df.withColumn(cols + "_last_row", last(cols + "_order").over(first_last_row_window))
         df = df.withColumn("is_first_" + cols, col(cols + "_order") == col(cols + "_first_row"))
@@ -16,3 +22,38 @@ def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
     # df.orderBy(*OrderByCols).show(truncate=False)
 
     return df
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.appName('SparkByExamples.com').getOrCreate()
+
+    data = (
+        (1, 'C/I', 45, 45, 45),
+        (1, 'C/I', 44, 44, 44),
+        (1, 'END', 74, 45, 46),
+        (2, 'PEP', 45, 45, 47),
+        (2, 'PEP', 54, 45, 48),
+        (3, 'U/T', 87, 45, 49),
+        (3, 'PEN', 92, 45, 50),
+        (3, 'END', 87, 45, 51),
+        (4, 'U/T', 23, 45, 52),
+        (5, 'PEN', 87, 45, 53),
+        (5, 'Ken', 87, 45, 54),
+        (6, 'U/T', 63, 45, 55),
+        (8, 'Priya', 72, 45, 56),
+        (9, 'David', 72, 45, 57),
+        (9, 'David1', 75, 45, 58)
+    )
+
+    columns = ["mort_no", "repayment_vehicle_type", "start_date", "start_time", "facility_covered"]
+
+    df = spark.createDataFrame(data=data, schema=columns)
+
+    # df.show(truncate=False)
+
+    df = prepare_first_last_row_column(df, ["mort_no"],[col("mort_no")])
+
+    
+
+
+    df.printSchema()
