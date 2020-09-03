@@ -1,25 +1,18 @@
- columns = ["vb_account_seq", "start_time"]
+def prepare_first_last_row_column(dataframe, partitionCols, OrderByCols):
+    df = dataframe
+    partitions = []
+    for cols in partitionCols:
+        partitions.append(col(cols))
+        row_number_window = Window.partitionBy(*partitions).orderBy(*OrderByCols)
+        df = df.withColumn(cols + "_order", row_number().over(row_number_window))
+        first_last_row_window = Window.partitionBy(*partitions).orderBy(*OrderByCols).rowsBetween(Window.unboundedPreceding,
+                                                                                            Window.unboundedFollowing)
+        df = df.withColumn(cols + "_first_row", first(cols + "_order").over(first_last_row_window))
+        df = df.withColumn(cols + "_last_row", last(cols + "_order").over(first_last_row_window))
+        df = df.withColumn("is_first_" + cols, col(cols + "_order") == col(cols + "_first_row"))
+        df = df.withColumn("is_last_" + cols, col(cols + "_order") == col(cols + "_last_row"))
+        df = df.drop(cols + "_order", cols + "_first_row", cols + "_last_row")
 
-    df = spark.createDataFrame(data=data, schema=columns)
+    # df.orderBy(*OrderByCols).show(truncate=False)
 
-    orderByCols = [col("vb_account_seq"), col("start_time").desc()]
-
-    row_number_window = Window.orderBy(*orderByCols)
-
-    df = df.withColumn("prev_start_date", lag("start_time", 1).over(row_number_window))
-
-    df = df.withColumn("prev_start_date_order", row_number().over(row_number_window))
-
-    first_last_row_window = Window.partitionBy(col('vb_account_seq')).orderBy(*orderByCols).rowsBetween(
-        Window.unboundedPreceding,
-        Window.unboundedFollowing)
-    df = df.withColumn("prev_start_date_first_row", first("prev_start_date_order").over(first_last_row_window))
-
-    df = df.withColumn("first_vb_account_seq", col("prev_start_date_order") == col("prev_start_date_first_row"))
-
-    df = df.withColumn("prev_start_date",
-                       when(col("first_vb_account_seq") == True, None).otherwise(col("prev_start_date")))
-
-    df = df.withColumn("end_date", col("prev_start_date") - lit(1))
-
-    df.show(truncate=False)
+    return df
