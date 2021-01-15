@@ -1,0 +1,64 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import StructField, StructType, DateType, IntegerType, StringType, TimestampType
+from datetime import datetime, date
+import time
+from pyspark.sql.functions import col
+
+current_milli_time = lambda: int(round(time.time() * 1000))
+
+JOB_AUDIT_SCHEMA = StructType([
+    StructField("application_id", StringType(), True),
+    StructField("job_name", StringType(), True),
+    StructField("function_name", StringType(), True),
+    StructField("run_date_time", TimestampType(), True),
+    StructField("status", StringType(), True),
+    StructField("message", StringType(), True)
+])
+
+JOB_AUDIT_READ_SCHEMA = StructType([
+    StructField("extract_date", DateType(), True),
+    StructField("application_id", StringType(), True),
+    StructField("job_name", StringType(), True),
+    StructField("function_name", StringType(), True),
+    StructField("run_date_time", TimestampType(), True),
+    StructField("status", StringType(), True),
+    StructField("message", StringType(), True)
+])
+
+
+def save_job_details(seq):
+    app_id = spark._sc.applicationId
+    extract_date = date(2020, 1, 1)
+    job_name = "My-Job-" + str(seq)
+    function_name = "main-function"
+    run_date_time = datetime.now()
+    df = spark.createDataFrame([(app_id, job_name, function_name, run_date_time, JobStatus.started, "")],
+                               ['application_id', 'job_name', 'function_name', 'run_date_time',"status","message"])
+    # df.show(truncate=False)
+    # print("file:///c:/tmp/test/extract_date={}".format(extract_date))
+    df.coalesce(1).write.mode("append").parquet("file:///c:/tmp/test/extract_date={}".format(extract_date))
+    print(extract_date, app_id, job_name, function_name, run_date_time)
+
+
+def read_job_details():
+    df = spark.read.parquet("file:///c:/tmp/test/")
+    # df.filter(col('run_date_time') > '2021-01-14').show(truncate=False)
+    df.printSchema()
+    df.show(100, truncate=False)
+
+
+class JobStatus:
+    started = "STARTED"
+    completed = "COMPLETED"
+    in_progress = "IN_PROGRESS"
+    failed = "FAILED"
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.master("local[*]").appName("local-job").getOrCreate()
+    spark.sparkContext.setLogLevel("WARN")
+
+    for seq in range(10):
+        save_job_details(seq)
+
+    read_job_details()
