@@ -1,3 +1,11 @@
+fields = []
+    for field in df.schema.fields:
+        fields.append((field.name,field.dataType))
+    fields.sort(key=lambda x: x[1])
+    for f in fields:
+        print("{}-{}".format(f[1],f[2]))
+
+
 from pyspark.sql.types import StructField, StructType, DateType
 from datetime import datetime, timedelta
 
