@@ -1,0 +1,66 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+import re
+from datetime import date
+
+
+def extract_in_python(content, dt1, dt2):
+    if content == None:
+        regex = r'^(.*?)\s(\w*?)$'
+
+        search_result = re.search(regex, content)
+
+        if dt1 == None:
+            print("dt1 is None")
+        else:
+            print("dt1 is not None")
+            dt1 = -99999999999
+
+        if search_result:
+            postal_code = int(search_result.group(1))
+            if str(postal_code) == str(1.0):
+                print("Equal")
+            city = search_result.group(2)
+            cond = ((str(dt1) <= str(dt2)) and (str(dt1) < str(dt2)))
+            return postal_code, city, cond
+        else:
+            return None, None
+    else:
+        return None, None,None
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.master("local[*]").appName("dataframe_basics").getOrCreate()
+
+    df_schema = StructType([StructField('to_be_extracted', StringType())])
+
+    test_list = [
+        ['1183 Amsterdam'],
+        ['06123 Ankara'],
+        ['08067 Barcelona'],
+        ['3030 Bern'],
+        ['75116 Paris'],
+        ['1149014 Lisbon'],
+        ['00999 Warsaw'],
+        ['00199 Rome'],
+        [None]
+    ]
+
+    df = spark.createDataFrame(test_list, schema=df_schema)
+
+    df.show(truncate=False)
+
+    schema = StructType([
+        StructField("postal_code", IntegerType(), False),
+        StructField("city", StringType(), False),
+        StructField("cond", BooleanType(), False)
+    ])
+
+    extract_udf = udf(extract_in_python, schema)
+    # extract_udf = udf(extract_in_python, ArrayType(StringType()))
+
+    df2 = df.withColumn('extracted', extract_udf(df['To_be_Extracted'], lit(date(2021, 1, 1)), lit(date(2021, 1, 1))))
+
+    df2.printSchema()
+    df2.show(truncate=False)
