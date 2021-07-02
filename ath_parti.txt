@@ -46,6 +46,12 @@ def load_partition_cache(filename):
 
 # https://github.com/gautam-shanbhag/AWS-Load-New-Partitions-Programmatically/blob/89c9ef9bccaa1917386bb9e5c025e25bf309af6c/loadPartitions.py#L88
 
+import boto3
+import re
+import time
+import botocore
+import sys
+
 s3Client = boto3.client('s3', region_name=params['region'])
 s3Resource = boto3.resource('s3')
 
