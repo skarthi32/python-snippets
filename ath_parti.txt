@@ -204,3 +204,55 @@ if yearFolders:
             print(resultSet)
             print(e)
             raise
+
+
+======================================================================================================
+
+def add_new_partitions(table_source_location, database_name, target_table):
+    """
+    Compare existing prefixes in S3 against existing partitions in athena, then add any missing.
+    Currently only supports one level of partition depth.
+    :param table_source_location: location of data in S3
+    :param database_name: athena database
+    :param target_table: table to compare against
+    """
+    s3_hook = S3Hook()
+    bucket, prefix = S3Hook.parse_s3_url(table_source_location)
+    prefix = prefix.strip('/') + '/'
+    partition_prefixes = s3_hook.list_prefixes(bucket, prefix, '/')
+    partitions_pending = [p.strip('/').split('/')[-1] for p in partition_prefixes]
+
+    # get list of current partitions for the table
+    athena_hook = AthenaHook()
+    partition_results = athena_hook.execute_query_with_results(
+        query='SHOW PARTITIONS {table}'.format(table=target_table),
+        database_name=database_name
+    )
+
+    # result looks like this [{'partition': 'created_date=2019-01-17'}, {'partition': 'created_date=2019-01-18'}]
+    existing_partition_values = [partition_result['partition'] for partition_result in partition_results]
+
+    partition_diffs = set(partitions_pending) - set(existing_partition_values)
+
+    # create all new partitions
+    partitions_to_add = []
+    for partition_diff in partition_diffs:
+        col_name, col_value = partition_diff.split('=')
+        partitions_to_add.append("\tPARTITION ({col_name} = '{col_value}') LOCATION '{location}'".format(
+            col_name=col_name,
+            col_value=col_value,
+            location='{}/{}'.format(table_source_location, partition_diff))
+        )
+
+    if partitions_to_add:
+        add_partitions_query = 'ALTER TABLE {table} ADD\n{partitions}'.format(
+            table=target_table,
+            partitions='\n'.join(partitions_to_add)
+        )
+
+        print(add_partitions_query)
+
+        athena_hook.execute_query(
+            query=add_partitions_query,
+            database_name=database_name
+        )
