@@ -1,0 +1,84 @@
+from pyspark.sql import SparkSession
+from pyspark.sql.types import *
+from pyspark.sql.functions import *
+from pyspark.sql.column import Column
+import re
+from datetime import date
+
+
+def isEqualTo(self, value):
+    return (self.isNull() & value.isNull()) | ((self.isNotNull() & value.isNotNull()) & (self == value))
+
+
+if __name__ == "__main__":
+    spark = SparkSession.builder.master("local[*]").appName("dataframe_basics").getOrCreate()
+    sc = spark.sparkContext
+    logger = sc._jvm.org.apache.log4j
+    logger.LogManager.getLogger("org").setLevel(logger.Level.ERROR)
+    logger.LogManager.getLogger("akka").setLevel(logger.Level.ERROR)
+
+    Column.isEqualTo = isEqualTo
+
+    emp = [(1, "David", 45),
+           (2, "Sam",45 ),
+           (3, "Bane", 87),
+           (4, "Dane", 23),
+           (5, "Jenny", 87),
+           (6, "Simran", 63),
+           (8, "Priya", 72)
+           ]
+    empColumns = ["id", "name", "score"]
+
+    empDF = spark.createDataFrame(data=emp, schema=empColumns)
+
+    emp2 = [(1, "David", 45),
+           (2, "Sam",45 ),
+           (3, "Bane", 85),
+           (4, "Dane", 23),
+           (5, "Jenny", 80),
+           (6, "Simran", 63),
+           (7, "Ken", 72)
+           ]
+
+    empDF2 = spark.createDataFrame(data=emp2, schema=empColumns)
+
+    empDF.show()
+    empDF2.show()
+
+    cond = (
+            (col("a.id").isEqualTo(col("b.id"))) &
+            (col("a.name").isEqualTo(col("b.name"))) &
+            (col("a.score").isEqualTo(col("b.score")))
+    )
+
+    out_df = empDF.alias("a").join(empDF2.alias("b"), cond, "outer")
+
+    # out_df = out_df.withColumn("out_cond", lit(cond))
+
+    # empDF.alias("a").join(empDF2.alias("b"), cond, "outer").show(truncate=False)
+
+    out_df.show(truncate=False)
+
+    print("################NO changes##########################")
+    no_changes = out_df.filter(col('a.id').isNotNull() & col('b.id').isNotNull()).select("a.*").withColumn("out_rec",lit('1'))
+    no_changes.show(truncate=False)
+
+    print("################Existing record has changed##########################")
+    existing_record_has_changed = out_df.filter(col('a.id').isNotNull() & col('b.id').isNull()).select("a.*")
+    existing_record_has_changed.show(truncate=False)
+
+    existing_record_has_changed2 = existing_record_has_changed.alias("a").join(empDF2.alias("b"),
+                                                                               col("a.id").isEqualTo(
+                                                                                   col("b.id")),
+                                                                               "left")
+    existing_record_has_changed2 = existing_record_has_changed2.withColumn("out_rec",when(col("b.id").isNull(),lit('2')).otherwise(lit('3'))).select("a.*",'out_rec')
+    existing_record_has_changed2.show(truncate=False)
+
+    print("################Output the new record##########################")
+    new_record = out_df.filter(col('a.id').isNull() & col('b.id').isNotNull()).select("b.*").withColumn("out_rec",lit('4'))
+    new_record.show(truncate=False)
+
+    # out_df1 = empDF.alias("a").join(empDF2.alias("b"), cond, "left")
+
+    print("################Complete Output##########################")
+    no_changes.unionByName(existing_record_has_changed2).unionByName(new_record).orderBy(col('id')).show(truncate=False)
